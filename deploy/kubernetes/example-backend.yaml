@@ -40,3 +40,21 @@ spec:
           requests:
             cpu: 100m
             memory: 200Mi
+        livenessProbe:
+          exec:
+            command:
+            - stat
+            - /tmp/pitaya-health
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - stat
+            - /tmp/pitaya-ready
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2

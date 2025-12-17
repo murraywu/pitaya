@@ -1,6 +1,8 @@
 package pitaya
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/topfreegames/pitaya/v3/pkg/acceptor"
 	"github.com/topfreegames/pitaya/v3/pkg/agent"
@@ -23,26 +25,27 @@ import (
 
 // Builder holds dependency instances for a pitaya App
 type Builder struct {
-	acceptors        []acceptor.Acceptor
-	postBuildHooks   []func(app Pitaya)
-	Config           config.PitayaConfig
-	DieChan          chan bool
-	PacketDecoder    codec.PacketDecoder
-	PacketEncoder    codec.PacketEncoder
-	MessageEncoder   *message.MessagesEncoder
-	Serializer       serialize.Serializer
-	Router           *router.Router
-	RPCClient        cluster.RPCClient
-	RPCServer        cluster.RPCServer
-	MetricsReporters []metrics.Reporter
-	Server           *cluster.Server
-	ServerMode       ServerMode
-	ServiceDiscovery cluster.ServiceDiscovery
-	Groups           groups.GroupService
-	SessionPool      session.SessionPool
-	Worker           *worker.Worker
-	RemoteHooks      *pipeline.RemoteHooks
-	HandlerHooks     *pipeline.HandlerHooks
+	acceptors          []acceptor.Acceptor
+	postBuildHooks     []func(app Pitaya)
+	Config             config.PitayaConfig
+	DieChan            chan bool
+	PacketDecoder      codec.PacketDecoder
+	PacketEncoder      codec.PacketEncoder
+	MessageEncoder     *message.MessagesEncoder
+	Serializer         serialize.Serializer
+	Router             *router.Router
+	RPCClient          cluster.RPCClient
+	RPCServer          cluster.RPCServer
+	MetricsReporters   []metrics.Reporter
+	Server             *cluster.Server
+	ServerMode         ServerMode
+	ServiceDiscovery   cluster.ServiceDiscovery
+	Groups             groups.GroupService
+	SessionPool        session.SessionPool
+	Worker             *worker.Worker
+	RemoteHooks        *pipeline.RemoteHooks
+	HandlerHooks       *pipeline.HandlerHooks
+	healthCheckTimeout *time.Duration
 }
 
 // PitayaBuilder Builder interface
@@ -184,6 +187,11 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 	builder.postBuildHooks = append(builder.postBuildHooks, hook)
 }
 
+// SetHealthCheck enables health check with the specified timeout for readiness checks
+func (builder *Builder) SetHealthCheck(timeout time.Duration) {
+	builder.healthCheckTimeout = &timeout
+}
+
 // Build returns a valid App instance
 func (builder *Builder) Build() Pitaya {
 	handlerPool := service.NewHandlerPool()
@@ -242,7 +250,12 @@ func (builder *Builder) Build() Pitaya {
 		handlerPool,
 	)
 
-	app := NewApp(
+	var healthCheckTimeout time.Duration
+	if builder.healthCheckTimeout != nil {
+		healthCheckTimeout = *builder.healthCheckTimeout
+	}
+
+	app := newApp(
 		builder.ServerMode,
 		builder.Serializer,
 		builder.acceptors,
@@ -259,6 +272,8 @@ func (builder *Builder) Build() Pitaya {
 		builder.SessionPool,
 		builder.MetricsReporters,
 		builder.Config,
+		builder.healthCheckTimeout != nil,
+		healthCheckTimeout,
 	)
 
 	for _, postBuildHook := range builder.postBuildHooks {

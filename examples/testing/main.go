@@ -26,6 +26,7 @@ import (
 	"flag"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
@@ -301,6 +302,8 @@ func main() {
 func createApp(serializer string, port int, grpc bool, isFrontend bool, svType string, serverMode pitaya.ServerMode, metadata map[string]string, cfg ...*viper.Viper) (pitaya.Pitaya, *modules.ETCDBindingStorage, session.SessionPool) {
 	conf := config.NewConfig(cfg...)
 	builder := pitaya.NewBuilderWithConfigs(isFrontend, svType, serverMode, metadata, conf)
+
+	builder.SetHealthCheck(time.Second * 10)
 
 	if isFrontend {
 		tcp := acceptor.NewTCPAcceptor(fmt.Sprintf(":%d", port))

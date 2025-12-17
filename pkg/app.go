@@ -27,10 +27,10 @@ import (
 	"reflect"
 	"strings"
 	"syscall"
-
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/nats-io/nats.go"
 	"github.com/topfreegames/pitaya/v3/pkg/acceptor"
 	"github.com/topfreegames/pitaya/v3/pkg/cluster"
 	"github.com/topfreegames/pitaya/v3/pkg/component"
@@ -41,6 +41,7 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/docgenerator"
 	"github.com/topfreegames/pitaya/v3/pkg/errors"
 	"github.com/topfreegames/pitaya/v3/pkg/groups"
+	"github.com/topfreegames/pitaya/v3/pkg/health"
 	"github.com/topfreegames/pitaya/v3/pkg/interfaces"
 	"github.com/topfreegames/pitaya/v3/pkg/logger"
 	logging "github.com/topfreegames/pitaya/v3/pkg/logger/interfaces"
@@ -54,6 +55,7 @@ import (
 	"github.com/topfreegames/pitaya/v3/pkg/timer"
 	"github.com/topfreegames/pitaya/v3/pkg/tracing"
 	"github.com/topfreegames/pitaya/v3/pkg/worker"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -131,32 +133,35 @@ type Pitaya interface {
 
 // App is the base app struct
 type App struct {
-	acceptors         []acceptor.Acceptor
-	config            config.PitayaConfig
-	debug             bool
-	dieChan           chan bool
-	heartbeat         time.Duration
-	onSessionBind     func(session.Session)
-	router            *router.Router
-	rpcClient         cluster.RPCClient
-	rpcServer         cluster.RPCServer
-	metricsReporters  []metrics.Reporter
-	running           bool
-	serializer        serialize.Serializer
-	server            *cluster.Server
-	serverMode        ServerMode
-	serviceDiscovery  cluster.ServiceDiscovery
-	startAt           time.Time
-	worker            *worker.Worker
-	remoteService     *service.RemoteService
-	handlerService    *service.HandlerService
-	handlerComp       []regComp
-	remoteComp        []regComp
-	modulesMap        map[string]interfaces.Module
-	modulesArr        []moduleWrapper
-	sessionModulesArr []sessionModuleWrapper
-	groups            groups.GroupService
-	sessionPool       session.SessionPool
+	acceptors          []acceptor.Acceptor
+	config             config.PitayaConfig
+	debug              bool
+	dieChan            chan bool
+	heartbeat          time.Duration
+	onSessionBind      func(session.Session)
+	router             *router.Router
+	rpcClient          cluster.RPCClient
+	rpcServer          cluster.RPCServer
+	metricsReporters   []metrics.Reporter
+	running            bool
+	serializer         serialize.Serializer
+	server             *cluster.Server
+	serverMode         ServerMode
+	serviceDiscovery   cluster.ServiceDiscovery
+	startAt            time.Time
+	worker             *worker.Worker
+	remoteService      *service.RemoteService
+	handlerService     *service.HandlerService
+	handlerComp        []regComp
+	remoteComp         []regComp
+	modulesMap         map[string]interfaces.Module
+	modulesArr         []moduleWrapper
+	sessionModulesArr  []sessionModuleWrapper
+	groups             groups.GroupService
+	sessionPool        session.SessionPool
+	healthChecker      *health.Checker
+	healthCheckTimeout time.Duration
+	healthCheckEnabled bool
 }
 
 // NewApp is the base constructor for a pitaya app instance
@@ -178,32 +183,82 @@ func NewApp(
 	metricsReporters []metrics.Reporter,
 	config config.PitayaConfig,
 ) *App {
+	return newApp(
+		serverMode,
+		serializer,
+		acceptors,
+		dieChan,
+		router,
+		server,
+		rpcClient,
+		rpcServer,
+		worker,
+		serviceDiscovery,
+		remoteService,
+		handlerService,
+		groups,
+		sessionPool,
+		metricsReporters,
+		config,
+		false, // enableHealthCheck - default disabled for backward compatibility
+		0,     // healthCheckTimeout - not used when disabled
+	)
+}
+
+func newApp(
+	serverMode ServerMode,
+	serializer serialize.Serializer,
+	acceptors []acceptor.Acceptor,
+	dieChan chan bool,
+	router *router.Router,
+	server *cluster.Server,
+	rpcClient cluster.RPCClient,
+	rpcServer cluster.RPCServer,
+	worker *worker.Worker,
+	serviceDiscovery cluster.ServiceDiscovery,
+	remoteService *service.RemoteService,
+	handlerService *service.HandlerService,
+	groups groups.GroupService,
+	sessionPool session.SessionPool,
+	metricsReporters []metrics.Reporter,
+	config config.PitayaConfig,
+	enableHealthCheck bool,
+	healthCheckTimeout time.Duration,
+) *App {
 	app := &App{
-		server:            server,
-		config:            config,
-		rpcClient:         rpcClient,
-		rpcServer:         rpcServer,
-		worker:            worker,
-		serviceDiscovery:  serviceDiscovery,
-		remoteService:     remoteService,
-		handlerService:    handlerService,
-		groups:            groups,
-		debug:             false,
-		startAt:           time.Now(),
-		dieChan:           dieChan,
-		acceptors:         acceptors,
-		metricsReporters:  metricsReporters,
-		serverMode:        serverMode,
-		running:           false,
-		serializer:        serializer,
-		router:            router,
-		handlerComp:       make([]regComp, 0),
-		remoteComp:        make([]regComp, 0),
-		modulesMap:        make(map[string]interfaces.Module),
-		modulesArr:        []moduleWrapper{},
-		sessionModulesArr: []sessionModuleWrapper{},
-		sessionPool:       sessionPool,
+		server:             server,
+		config:             config,
+		rpcClient:          rpcClient,
+		rpcServer:          rpcServer,
+		worker:             worker,
+		serviceDiscovery:   serviceDiscovery,
+		remoteService:      remoteService,
+		handlerService:     handlerService,
+		groups:             groups,
+		debug:              false,
+		startAt:            time.Now(),
+		dieChan:            dieChan,
+		acceptors:          acceptors,
+		metricsReporters:   metricsReporters,
+		serverMode:         serverMode,
+		running:            false,
+		serializer:         serializer,
+		router:             router,
+		handlerComp:        make([]regComp, 0),
+		remoteComp:         make([]regComp, 0),
+		modulesMap:         make(map[string]interfaces.Module),
+		modulesArr:         []moduleWrapper{},
+		sessionModulesArr:  []sessionModuleWrapper{},
+		sessionPool:        sessionPool,
+		healthCheckTimeout: healthCheckTimeout,
+		healthCheckEnabled: enableHealthCheck,
 	}
+
+	// Create health checker if enabled
+	if enableHealthCheck {
+		app.healthChecker = health.NewChecker()
+	}
+
 	if app.heartbeat == time.Duration(0) {
 		app.heartbeat = config.Heartbeat.Interval
 	}
@@ -317,11 +372,15 @@ func (app *App) Start() {
 
 	app.periodicMetrics()
 
+	app.startLivenessCheck()
 	app.listen()
+
+	app.startReadinessCheck()
 
 	defer func() {
 		timer.GlobalTicker.Stop()
 		app.running = false
+		app.stopHealthChecks()
 	}()
 
 	sg := make(chan os.Signal, 1)
@@ -424,6 +483,59 @@ func (app *App) listen() {
 	app.running = true
 }
 
+func (app *App) startReadinessCheck() {
+	if app.healthChecker == nil {
+		return
+	}
+
+	// Get NATS connection (if available)
+	var natsConn *nats.Conn
+	if app.rpcClient != nil {
+		if natsClient, ok := app.rpcClient.(interface{ GetNatsConn() *nats.Conn }); ok {
+			natsConn = natsClient.GetNatsConn()
+		}
+	}
+	if natsConn == nil && app.rpcServer != nil {
+		if natsServer, ok := app.rpcServer.(interface{ GetNatsConn() *nats.Conn }); ok {
+			natsConn = natsServer.GetNatsConn()
+		}
+	}
+
+	// Get ETCD client (if available)
+	var etcdCli *clientv3.Client
+	if app.serviceDiscovery != nil {
+		if etcdSD, ok := app.serviceDiscovery.(interface{ GetEtcdClient() *clientv3.Client }); ok {
+			etcdCli = etcdSD.GetEtcdClient()
+		}
+	}
+
+	// Start readiness check
+	if err := app.healthChecker.StartReadinessCheck(app.healthCheckTimeout, natsConn, etcdCli); err != nil {
+		logger.Log.Error("failed to start readiness check: %s", err.Error())
+	} else {
+		logger.Log.Info("server is ready to receive traffic")
+	}
+}
+
+func (app *App) startLivenessCheck() {
+	if app.healthChecker == nil {
+		return
+	}
+	if err := app.healthChecker.StartLivenessCheck(); err != nil {
+		logger.Log.Error("failed to start liveness check: %s", err.Error())
+	} else {
+		logger.Log.Info("liveness check is enabled")
+	}
+}
+
+func (app *App) stopHealthChecks() {
+	if app.healthChecker == nil {
+		return
+	}
+	app.healthChecker.StopLivenessCheck()
+	app.healthChecker.StopReadinessCheck()
+}
+
 // SetDictionary sets routes map
 func (app *App) SetDictionary(dict map[string]uint16) error {
 	if app.running {
@@ -450,6 +562,7 @@ func (app *App) AddRoute(
 
 // Shutdown send a signal to let 'pitaya' shutdown itself.
 func (app *App) Shutdown() {
+	app.stopHealthChecks()
 	select {
 	case <-app.dieChan: // prevent closing closed channel
 	default:
@@ -559,4 +672,9 @@ func (app *App) RegisterRPCJob(rpcJob worker.RPCJob) error {
 // GetNumberOfConnectedClients returns the number of connected clients
 func (app *App) GetNumberOfConnectedClients() int64 {
 	return app.sessionPool.GetSessionCount()
+}
+
+// GetHealthChecker returns the health checker instance (may be nil if not enabled)
+func (app *App) GetHealthChecker() *health.Checker {
+	return app.healthChecker
 }
